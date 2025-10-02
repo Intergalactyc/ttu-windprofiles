@@ -11,3 +11,5 @@ venv*/
 
 .stignore
 *.sync-conflict*
+
+config.ini
