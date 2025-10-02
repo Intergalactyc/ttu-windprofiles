@@ -1,0 +1,5 @@
+windprofiles @ git+https://github.com/Intergalactyc/windprofiles@main
+matplotlib
+fastparquet
+pandas
+numpy
