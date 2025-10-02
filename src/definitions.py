@@ -1,6 +1,14 @@
 from windprofiles import Location
 import os
 
+ROWS_PER_FILE = 60*50*30 # 50 Hz for 30 minutes
+
+SPLIT_INTO_CHUNKS = 3
+CHUNK_SIZE, ERR = divmod(ROWS_PER_FILE, SPLIT_INTO_CHUNKS)
+assert not ERR
+CHUNK_TIME, ERR = divmod(30, SPLIT_INTO_CHUNKS)
+assert not ERR
+
 OUTLIER_REMOVAL_WINDOW = 60*50*5 # records; this is 5 minutes
 OUTLIER_REMOVAL_SIGMA = 5
 

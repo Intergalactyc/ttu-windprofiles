@@ -13,3 +13,5 @@ venv*/
 *.sync-conflict*
 
 config.ini
+
+results/
