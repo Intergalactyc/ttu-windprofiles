@@ -3,3 +3,4 @@ matplotlib
 pyarrow
 pandas
 numpy
+pyqt5

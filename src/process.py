@@ -12,6 +12,9 @@ import os
 warnings.filterwarnings("ignore", message = "DataFrame is highly fragmented")
 
 
+# TODO: check the units - is pressure really originally in inHg? because converted results are ~85-90 which is ~0.9 atm
+
+
 def get_datetime_from_filename(filepath: os.PathLike) -> pd.Timestamp:
     filename = os.path.basename(filepath).split(".")[0]
     DATE_STR = filename.split("_")[4]
@@ -76,12 +79,7 @@ def summarize_df(df: pd.DataFrame, booms_available: list[int], timestamp: pd.Tim
     return result
 
 
-def summarize_file(filepath: os.PathLike) -> list[dict]:
-    df, booms_available = load_and_format_file(filepath)
-
-    # Unit conversion
-    df = process.convert_dataframe_units(df, from_units = SOURCE_UNITS, gravity = LOCATION.g)
-    
+def qc_step(df):
     # Rolling outlier removal
     df, elims = process.rolling_outlier_removal(df = df,
                                             window_size_observations = OUTLIER_REMOVAL_WINDOW,
@@ -93,6 +91,25 @@ def summarize_file(filepath: os.PathLike) -> list[dict]:
         if val > ROWS_PER_FILE*0.02:
             print(f"For {filepath}, more than 2% ({val}) of {key} removed as spikes")
 
+    return df
+
+
+def process_file(filepath: os.PathLike, qc: bool = True) -> list[dict]:
+    df, booms_available = load_and_format_file(filepath)
+
+    # Unit conversion
+    df = process.convert_dataframe_units(df, from_units = SOURCE_UNITS, gravity = LOCATION.g)
+    
+    # QC step
+    if qc:
+        df = qc_step(df)
+
+    return df, booms_available
+
+
+def summarize_file(filepath: os.PathLike) -> list[dict]:
+    df, booms_available = process_file(filepath)
+
     TIMESTAMP = get_datetime_from_filename(filepath).tz_convert(LOCATION.timezone)
 
     split = [df.iloc[CHUNK_SIZE*i:CHUNK_SIZE*(i+1)] for i in range(SPLIT_INTO_CHUNKS)]
@@ -102,7 +119,7 @@ def summarize_file(filepath: os.PathLike) -> list[dict]:
     return result
 
 
-def process_day_directory(dirpath: os.PathLike, savename: os.PathLike, nproc: int, test: bool):
+def process_day_directory(dirpath: os.PathLike, nproc: int, test: bool) -> pd.DataFrame:
     df = sonic.analyze_directory(
         path=dirpath,
         analysis=summarize_file,
@@ -115,12 +132,11 @@ def process_day_directory(dirpath: os.PathLike, savename: os.PathLike, nproc: in
     df["time"] = pd.to_datetime(df["time"])
     df.set_index("time", inplace=True)
     df.sort_index(ascending=True, inplace=True)
-    saveto = os.path.join(results_dir, "testing", savename) if test else os.path.join(results_dir, "processed", savename)
-    df.to_csv(saveto, float_format="%g")
+    return df
 
 
 def main():
-    args = parse()
+    args = parse("process")
     if (n:=args.get("nproc")) is None:
         args["nproc"] = NPROC
     elif not isinstance(n, int) or n < 1:
@@ -135,15 +151,21 @@ def main():
     for k, v in dirs.items():
         dirpath = os.path.join(args["data"], v)
         days = os.listdir(dirpath)
+        dfs = []
         for d in days:
             day_dir = os.path.join(dirpath,d)
-            savename = f"{d}{k}.csv"
-            process_day_directory(day_dir, savename, args["nproc"], args["test"])
+            try:
+                df = process_day_directory(day_dir, args["nproc"], args["test"])
+            except Exception as e:
+                print(f"Encountered error for day {d} in {day_dir}: {e}")
+            else:
+                dfs.append(df)
             if args["test"]:
                 break
+        res = pd.concat(dfs, axis=0)
+        res.to_csv(os.path.join(results_dir, "testing" if args["test"] else "processed", f"{k}.csv"), float_format="%g")
         if args["test"]:
             break
-
 
 if __name__ == "__main__":
     main()

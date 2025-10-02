@@ -97,7 +97,9 @@ HEADER_MAP = {
 
 HEADER_MAP_INV = {v : k for k, v in HEADER_MAP.items()}
 
-BOOMS_LIST = list(range(1, 11))
-HEIGHTS_LIST = [0.9, 2.4, 4.0, 10.1, 16.8, 47.3, 74.7, 116.5, 158.2, 200.0]
-HEIGHTS = {b : h for b, h in zip(BOOMS_LIST, HEIGHTS_LIST)}
+ALL_BOOMS = list(range(1, 11))
+ALL_HEIGHTS = [0.9, 2.4, 4.0, 10.1, 16.8, 47.3, 74.7, 116.5, 158.2, 200.0]
+ALL_HEIGHTS_DICT = {b : h for b, h in zip(ALL_BOOMS, ALL_HEIGHTS)}
 DROP_BOOMS = [8, 10]
+BOOMS = [b for b in ALL_BOOMS if b not in DROP_BOOMS]
+HEIGHTS_DICT = {b : ALL_HEIGHTS_DICT[b] for b in BOOMS}
