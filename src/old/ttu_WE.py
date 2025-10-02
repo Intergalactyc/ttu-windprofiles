@@ -1,6 +1,6 @@
 import windprofiles.sonic as sonic
-import windprofiles.preprocess as preprocess
-from windprofiles.lib.other import zeropad
+import windprofiles.process.format as fmt
+import windprofiles.process.
 import pandas as pd
 import numpy as np
 
@@ -127,7 +127,7 @@ def process_file(filepath):
     return df, booms_available
 
 def process_day(day: int, short: bool = False):
-    return sonic.analyze_directory(path = f'{SOURCE_DIRECTORY}/{zeropad(day,2)}',
+    return sonic.analyze_directory(path = f'{SOURCE_DIRECTORY}/{str(day).zfill(2)}',
                                       analysis = summarize_file,
                                       nproc = NPROC,
                                       index = 'time',
@@ -141,7 +141,7 @@ def run_sonic_processing(short: bool = False):
         day_summary['time'] = pd.to_datetime(day_summary['time'])
         day_summary.set_index('time', inplace = True)
         day_summary.sort_index(ascending = True, inplace = True) # in case multiprocessing put it out of order
-        day_summary.to_csv(f'{OUTPUT_DIRECTORY}/2018Dec{zeropad(i,2)}_30min.csv', float_format = '%g')
+        day_summary.to_csv(f'{OUTPUT_DIRECTORY}/2018Dec{str(i).zfill(2)}_30min.csv', float_format = '%g')
 
 if __name__ == '__main__':
     import sys
