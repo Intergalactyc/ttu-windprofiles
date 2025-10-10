@@ -1,16 +1,17 @@
 # ruff: noqa: F403, F405
 from definitions import *
-from config import parse, results_dir
+from config import parse, parent_dir, results_dir
 import windprofiles.process as process
-import windprofiles.process.compute as compute
 import windprofiles.process.sonic as sonic
+import windprofiles.lib.stats as stats
 import windprofiles.lib.atmos as atmos
+from windprofiles.user.logs import get_main_logger
+import logging
 import pandas as pd
 import numpy as np
 import warnings
 import os
 warnings.filterwarnings("ignore", message = "DataFrame is highly fragmented")
-
 
 # TODO: check the units - is pressure really originally in inHg? because converted results are ~85-90 which is ~0.9 atm
 
@@ -46,6 +47,8 @@ def load_and_format_file(filepath: os.PathLike) -> tuple[pd.DataFrame, list[int]
 
 
 def summarize_df(df: pd.DataFrame, booms_available: list[int], timestamp: pd.Timestamp) -> dict:
+    logger = logging.getLogger("summarize_df")
+
     result = {"time" : timestamp}
 
     # TODO: streamwise coordinate alignment
@@ -53,9 +56,17 @@ def summarize_df(df: pd.DataFrame, booms_available: list[int], timestamp: pd.Tim
     # TODO: autocorrelations -> integral scales
 
     for b in booms_available:
+        df[f"u_{b}"], df[f"v_{b}"] = df[f"v_{b}"], -df[f"u_{b}"] # convert from (N, W) coordinates to (E, N) coordinates
         df[f"vpt_{b}"] = df.apply(lambda row : atmos.vpt_from_3(row[f"rh_{b}"], row[f"p_{b}"], row[f"t_{b}"]), axis = 1)
 
-    result |= sonic.get_stats(df, np.mean, "_mean", ["u", "v", "w", "ws", "wd", "t", "ts", "vpt", "rh", "p"])
+    result |= sonic.get_stats(df, np.mean, "_mean", ["w", "ws", "t", "ts", "vpt", "rh", "p"])
+    result |= sonic.get_stats(df, np.mean, "_raw_mean", ["u", "v"]) # pre-alignment means
+    result |= (mean_directions := sonic.mean_directions(df, booms_available)) # get mean directions for alignment
+    df = sonic.align_to_directions(df, mean_directions) # streamwise alignment
+    result |= sonic.get_stats(df, np.mean, "_mean", ["u", "v"]) # post-alignment means
+
+    # acs = sonic.compute_autocorrs(df)
+    # print(acs)
 
     for var in ["u","v","w","vpt"]: # Get Reynolds deviations
         for b in booms_available:
@@ -65,21 +76,43 @@ def summarize_df(df: pd.DataFrame, booms_available: list[int], timestamp: pd.Tim
         for b in booms_available:
             df[f"w'{var}'_{b}"] = df[f"w'_{b}"] * df[f"{var}'_{b}"]
 
-    result |= sonic.get_stats(df, np.std, "_std", ["u", "v", "w", "ws", "wd"])
+    for b in booms_available: # Get u'v'
+        df[f"u'v'_{b}"] = df[f"u'_{b}"] * df[f"v'_{b}"]
 
-    result |= sonic.get_stats(df, np.mean, "_mean", ["w'u'", "w'v'", "w'vpt'"])
+    result |= sonic.get_stats(df, np.std, "_rms", ["u", "v", "w", "ws", "wd"])
 
-    # Turbulence intensity (this and following can be done based on summary stats alone, so could be transferred to later step)
+    result |= sonic.get_stats(df, np.mean, "_mean", ["w'u'", "w'v'", "w'vpt'", "u'v'"])
+
+    # These can be done based on summary stats alone, so could be transferred to later step
     for b in booms_available:
-        result[f"ti_{b}"] = result[f"ws_{b}_std"] / result[f"ws_{b}_mean"]
+        # TODO: intermediate error handling here
+            # E.g. what if for some reason w'u' mean is not < 0
+        result[f"ti_{b}"] = result[f"ws_{b}_rms"] / result[f"ws_{b}_mean"] # Turbulence intensity
+        result[f"tke_{b}"] = result[f"u_{b}_rms"]**2 + result[f"v_{b}_rms"]**2 + result[f"w_{b}_rms"]**2 # TKE
+        if (flx := result[f"w'u'_{b}_mean"]) > 0:
+            logger.warning(f"Cannot compute u*, L, sparam for {timestamp}, boom {b} due to positive momentum flux ({flx})")
+        else:
+            result[f"u*_{b}"] = np.sqrt(-result[f"w'u'_{b}_mean"]) # Friction velocity
+            result[f"L_{b}"] = atmos.obukhov_length(result[f"u*_{b}"], result[f"vpt_{b}_mean"], result[f"w'vpt'_{b}_mean"], LOCATION.g) # Obukhov length
+            result[f"sparam_{b}"] = HEIGHTS_DICT[b] / result[f"L_{b}"] # Stability parameter z/L
+        # result[f"Rif_{b}"] = -
 
-    # TODO: compute L, Ri_b, Ri_f, alpha, u*
-        # Try getting these with different heights (/pairs for Ri_b) to see sensitivity to choice of height
+    heights = [HEIGHTS_DICT[b] for b in booms_available]
+    speeds = [result[f"ws_{b}_mean"] for b in booms_available]
+    _, result["alpha"] = stats.power_fit(
+        heights,
+        speeds
+    )
+    logger.info(f"Computed alpha={result['alpha']} for heights {heights}, speeds {speeds} (u means: {[result[f'u_{b}_mean'] for b in booms_available]})")
+
+    # TODO: Ri_b, Ri_f, Reynolds stress
+    # TODO: make sure above computations are ok so far
 
     return result
 
 
-def qc_step(df):
+def qc_step(df, filepath):
+    logger = logging.getLogger("qc")
     # Rolling outlier removal
     df, elims = process.rolling_outlier_removal(df = df,
                                             window_size_observations = OUTLIER_REMOVAL_WINDOW,
@@ -89,7 +122,7 @@ def qc_step(df):
 
     for key, val in elims.items():
         if val > ROWS_PER_FILE*0.02:
-            print(f"For {filepath}, more than 2% ({val}) of {key} removed as spikes")
+            logger.warning(f"For {filepath}, more than 2% ({val}) of {key} removed as spikes")
 
     return df
 
@@ -102,7 +135,7 @@ def process_file(filepath: os.PathLike, qc: bool = True) -> list[dict]:
     
     # QC step
     if qc:
-        df = qc_step(df)
+        df = qc_step(df, filepath)
 
     return df, booms_available
 
@@ -119,12 +152,13 @@ def summarize_file(filepath: os.PathLike) -> list[dict]:
     return result
 
 
-def process_day_directory(dirpath: os.PathLike, nproc: int, test: bool) -> pd.DataFrame:
+def process_day_directory(dirpath: os.PathLike, nproc: int, test: bool, logfile: os.PathLike) -> pd.DataFrame:
     df = sonic.analyze_directory(
         path=dirpath,
         analysis=summarize_file,
+        logfile=logfile,
         nproc=nproc,
-        limit=nproc if test else None,
+        limit=max(1,nproc-1) if test else None,
         index="time",
         progress=True
     )
@@ -136,6 +170,10 @@ def process_day_directory(dirpath: os.PathLike, nproc: int, test: bool) -> pd.Da
 
 
 def main():
+    logfile = os.path.join(parent_dir, "process.log")
+    logger = get_main_logger(logfile, clear=True)
+    logger.info("Started!")
+
     args = parse("process")
     if (n:=args.get("nproc")) is None:
         args["nproc"] = NPROC
@@ -149,15 +187,17 @@ def main():
         dirs = {o : dirs.get(o)}
     
     for k, v in dirs.items():
+        logger.info(f"On pair ({k},{v})")
         dirpath = os.path.join(args["data"], v)
         days = os.listdir(dirpath)
         dfs = []
         for d in days:
             day_dir = os.path.join(dirpath,d)
+            logger.info(f"Processing directory {day_dir}")
             try:
-                df = process_day_directory(day_dir, args["nproc"], args["test"])
+                df = process_day_directory(day_dir, args["nproc"], args["test"], logfile)
             except Exception as e:
-                print(f"Encountered error for day {d} in {day_dir}: {e}")
+                logger.exception(e)
             else:
                 dfs.append(df)
             if args["test"]:
@@ -166,6 +206,8 @@ def main():
         res.to_csv(os.path.join(results_dir, "testing" if args["test"] else "processed", f"{k}.csv"), float_format="%g")
         if args["test"]:
             break
+
+    logger.info("Complete!")
 
 if __name__ == "__main__":
     main()

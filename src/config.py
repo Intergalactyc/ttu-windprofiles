@@ -14,7 +14,7 @@ parser = Parser(paths=["data"], define=["process"])
 def parse(mode: str):
     match mode:
         case "process":
-            parser.add_argument("--nproc", "-n", type=int, metavar="N", help="Number of processors to use in multiprocessing")
+            parser.add_argument("--nproc", "-n", type=int, metavar="N", help="Number of processors to use in multiprocessing (note - one will be used for log listening)")
             parser.add_argument("--only", "-o", type=str, metavar="NAME", help="Single directory to process, by key name in [process] config section")
             parser.add_argument("--test", "-t", action="store_true", help="Short run for testing purposes")
             return parser.parse()
