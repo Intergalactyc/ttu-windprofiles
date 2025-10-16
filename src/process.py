@@ -57,7 +57,8 @@ def summarize_df(df: pd.DataFrame, booms_available: list[int], timestamp: pd.Tim
 
     for b in booms_available:
         df[f"u_{b}"], df[f"v_{b}"] = df[f"v_{b}"], -df[f"u_{b}"] # convert from (N, W) coordinates to (E, N) coordinates
-        df[f"vpt_{b}"] = df.apply(lambda row : atmos.vpt_from_3(row[f"rh_{b}"], row[f"p_{b}"], row[f"t_{b}"]), axis = 1)
+        df[f"vpt_{b}"], df[f"vt_{b}"] = df.apply(lambda row : atmos.vpt_from_3(row[f"rh_{b}"], row[f"p_{b}"], row[f"t_{b}"]), axis = 1)
+        # TODO: modify so that vt is reported along with vpt during calculation, and expand result
 
     result |= sonic.get_stats(df, np.mean, "_mean", ["w", "ws", "t", "ts", "vpt", "rh", "p"])
     result |= sonic.get_stats(df, np.mean, "_raw_mean", ["u", "v"]) # pre-alignment means
