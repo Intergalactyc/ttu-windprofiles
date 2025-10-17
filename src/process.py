@@ -13,7 +13,8 @@ import warnings
 import os
 warnings.filterwarnings("ignore", message = "DataFrame is highly fragmented")
 
-# TODO: check the units - is pressure really originally in inHg? because converted results are ~85-90 which is ~0.9 atm
+
+import matplotlib.pyplot as plt
 
 
 def get_datetime_from_filename(filepath: os.PathLike) -> pd.Timestamp:
@@ -46,70 +47,127 @@ def load_and_format_file(filepath: os.PathLike) -> tuple[pd.DataFrame, list[int]
     return df, booms_list
 
 
+def filtery(s):
+    si = np.arange(len(s))
+    mask = np.isfinite(s)
+    return np.interp(si, si[mask], s[mask])
+
 def summarize_df(df: pd.DataFrame, booms_available: list[int], timestamp: pd.Timestamp) -> dict:
     logger = logging.getLogger("summarize_df")
 
     result = {"time" : timestamp}
 
-    # TODO: streamwise coordinate alignment
-    # TODO: stationarity testing
-    # TODO: autocorrelations -> integral scales
-
     for b in booms_available:
         df[f"u_{b}"], df[f"v_{b}"] = df[f"v_{b}"], -df[f"u_{b}"] # convert from (N, W) coordinates to (E, N) coordinates
-        df[f"vpt_{b}"], df[f"vt_{b}"] = df.apply(lambda row : atmos.vpt_from_3(row[f"rh_{b}"], row[f"p_{b}"], row[f"t_{b}"]), axis = 1)
-        # TODO: modify so that vt is reported along with vpt during calculation, and expand result
+        df[f"es_{b}"] = atmos.saturation_vapor_pressure(df[f"t_{b}"]) # saturation vapor pressure
+        df[f"e_{b}"] = atmos.water_partial_pressure(df[f"rh_{b}"], df[f"es_{b}"]) # partial pressure of water
+        df[f"r_{b}"] = atmos.water_air_mixing_ratio(df[f"e_{b}"], df[f"p_{b}"]) # water-air mixing ratio
+        df[f"q_{b}"] = atmos.specific_humidity(df[f"r_{b}"]) # specific humidity
+        df[f"vt_{b}"] = atmos.virtual_temperature(df[f"t_{b}"], df[f"r_{b}"]) # virtual temperature
+        df[f"pt_{b}"] = atmos.potential_temperature(df[f"t_{b}"], df[f"p_{b}"]) # potential temperature
+        df[f"vpt_{b}"] = atmos.virtual_potential_temperature(df[f"pt_{b}"], df[f"r_{b}"]) # virtual potential temperature
+    
+    result |= sonic.get_stats(df, np.mean, "_mean", ["u", "es", "e", "r", "q", "vt", "pt", "vpt", "ts", "t"])
 
-    result |= sonic.get_stats(df, np.mean, "_mean", ["w", "ws", "t", "ts", "vpt", "rh", "p"])
-    result |= sonic.get_stats(df, np.mean, "_raw_mean", ["u", "v"]) # pre-alignment means
     result |= (mean_directions := sonic.mean_directions(df, booms_available)) # get mean directions for alignment
     df = sonic.align_to_directions(df, mean_directions) # streamwise alignment
-    result |= sonic.get_stats(df, np.mean, "_mean", ["u", "v"]) # post-alignment means
 
-    # acs = sonic.compute_autocorrs(df)
-    # print(acs)
+    for b in [9]:
+        x = df[f"u_{b}"]
+        xi = np.arange(len(x))
+        mask = np.isfinite(x)
+        xfiltered = np.interp(xi, xi[mask], x[mask])
+        fft = np.fft.rfft(xfiltered)
+        power_spectrum = np.abs(fft)**2
+        frequencies = np.fft.rfftfreq(len(df), 1/50)
+        fig, axs = plt.subplots()
+        # axs[0].plot(frequencies, power_spectrum)
+        # axs[0].set_xscale("log")
+        # axs[0].set_yscale("log")
+        # axs[1].plot(xi, x)
+        axs = [0,0,axs]
+        axs[2].plot(xi, df[f"pt_{b}"], label="potential")
+        axs[2].plot(xi, df[f"vt_{b}"], label="virtual")
+        axs[2].plot(xi, df[f"vpt_{b}"], label="virtual potential")
+        axs[2].plot(xi, df[f"ts_{b}"], label="sonic")
+        axs[2].plot(xi, df[f"t_{b}"], label="air")
+        axs[2].legend()
 
-    for var in ["u","v","w","vpt"]: # Get Reynolds deviations
-        for b in booms_available:
-            df[f"{var}'_{b}"] = df[f"{var}_{b}"] - result[f"{var}_{b}_mean"]
-    
-    for var in ["u","v","vpt"]: # Get vertical fluxes
-        for b in booms_available:
-            df[f"w'{var}'_{b}"] = df[f"w'_{b}"] * df[f"{var}'_{b}"]
+        print(np.corrcoef(filtery(df[f"vt_{b}"]), filtery(df[f"ts_{be}"]))[0,1])
 
-    for b in booms_available: # Get u'v'
-        df[f"u'v'_{b}"] = df[f"u'_{b}"] * df[f"v'_{b}"]
+        fig.tight_layout()
+        plt.show()
 
-    result |= sonic.get_stats(df, np.std, "_rms", ["u", "v", "w", "ws", "wd"])
 
-    result |= sonic.get_stats(df, np.mean, "_mean", ["w'u'", "w'v'", "w'vpt'", "u'v'"])
-
-    # These can be done based on summary stats alone, so could be transferred to later step
-    for b in booms_available:
-        # TODO: intermediate error handling here
-            # E.g. what if for some reason w'u' mean is not < 0
-        result[f"ti_{b}"] = result[f"ws_{b}_rms"] / result[f"ws_{b}_mean"] # Turbulence intensity
-        result[f"tke_{b}"] = result[f"u_{b}_rms"]**2 + result[f"v_{b}_rms"]**2 + result[f"w_{b}_rms"]**2 # TKE
-        if (flx := result[f"w'u'_{b}_mean"]) > 0:
-            logger.warning(f"Cannot compute u*, L, sparam for {timestamp}, boom {b} due to positive momentum flux ({flx})")
-        else:
-            result[f"u*_{b}"] = np.sqrt(-result[f"w'u'_{b}_mean"]) # Friction velocity
-            result[f"L_{b}"] = atmos.obukhov_length(result[f"u*_{b}"], result[f"vpt_{b}_mean"], result[f"w'vpt'_{b}_mean"], LOCATION.g) # Obukhov length
-            result[f"sparam_{b}"] = HEIGHTS_DICT[b] / result[f"L_{b}"] # Stability parameter z/L
-        # result[f"Rif_{b}"] = -
-
-    heights = [HEIGHTS_DICT[b] for b in booms_available]
-    speeds = [result[f"ws_{b}_mean"] for b in booms_available]
-    _, result["alpha"] = stats.power_fit(
-        heights,
-        speeds
-    )
-    logger.info(f"Computed alpha={result['alpha']} for heights {heights}, speeds {speeds} (u means: {[result[f'u_{b}_mean'] for b in booms_available]})")
-
-    # TODO: Ri_b, Ri_f, Reynolds stress
-    # TODO: make sure above computations are ok so far
 
     return result
+
+
+
+# def summarize_df(df: pd.DataFrame, booms_available: list[int], timestamp: pd.Timestamp) -> dict:
+#     logger = logging.getLogger("summarize_df")
+
+#     result = {"time" : timestamp}
+
+#     # TODO: streamwise coordinate alignment
+#     # TODO: stationarity testing
+#     # TODO: autocorrelations -> integral scales
+
+#     for b in booms_available:
+#         df[f"u_{b}"], df[f"v_{b}"] = df[f"v_{b}"], -df[f"u_{b}"] # convert from (N, W) coordinates to (E, N) coordinates
+#         df[f"vpt_{b}"], df[f"vt_{b}"] = df.apply(lambda row : atmos.vpt_from_3(row[f"rh_{b}"], row[f"p_{b}"], row[f"t_{b}"]), axis = 1)
+#         # TODO: modify so that vt is reported along with vpt during calculation, and expand result
+
+#     result |= sonic.get_stats(df, np.mean, "_mean", ["w", "ws", "t", "ts", "vpt", "rh", "p"])
+#     result |= sonic.get_stats(df, np.mean, "_raw_mean", ["u", "v"]) # pre-alignment means
+#     result |= (mean_directions := sonic.mean_directions(df, booms_available)) # get mean directions for alignment
+#     df = sonic.align_to_directions(df, mean_directions) # streamwise alignment
+#     result |= sonic.get_stats(df, np.mean, "_mean", ["u", "v"]) # post-alignment means
+
+#     # acs = sonic.compute_autocorrs(df)
+#     # print(acs)
+
+#     for var in ["u","v","w","vpt"]: # Get Reynolds deviations
+#         for b in booms_available:
+#             df[f"{var}'_{b}"] = df[f"{var}_{b}"] - result[f"{var}_{b}_mean"]
+    
+#     for var in ["u","v","vpt"]: # Get vertical fluxes
+#         for b in booms_available:
+#             df[f"w'{var}'_{b}"] = df[f"w'_{b}"] * df[f"{var}'_{b}"]
+
+#     for b in booms_available: # Get u'v'
+#         df[f"u'v'_{b}"] = df[f"u'_{b}"] * df[f"v'_{b}"]
+
+#     result |= sonic.get_stats(df, np.std, "_rms", ["u", "v", "w", "ws", "wd"])
+
+#     result |= sonic.get_stats(df, np.mean, "_mean", ["w'u'", "w'v'", "w'vpt'", "u'v'"])
+
+#     # These can be done based on summary stats alone, so could be transferred to later step
+#     for b in booms_available:
+#         # TODO: intermediate error handling here
+#             # E.g. what if for some reason w'u' mean is not < 0
+#         result[f"ti_{b}"] = result[f"ws_{b}_rms"] / result[f"ws_{b}_mean"] # Turbulence intensity
+#         result[f"tke_{b}"] = result[f"u_{b}_rms"]**2 + result[f"v_{b}_rms"]**2 + result[f"w_{b}_rms"]**2 # TKE
+#         if (flx := result[f"w'u'_{b}_mean"]) > 0:
+#             logger.warning(f"Cannot compute u*, L, sparam for {timestamp}, boom {b} due to positive momentum flux ({flx})")
+#         else:
+#             result[f"u*_{b}"] = np.sqrt(-result[f"w'u'_{b}_mean"]) # Friction velocity
+#             result[f"L_{b}"] = atmos.obukhov_length(result[f"u*_{b}"], result[f"vpt_{b}_mean"], result[f"w'vpt'_{b}_mean"], LOCATION.g) # Obukhov length
+#             result[f"sparam_{b}"] = HEIGHTS_DICT[b] / result[f"L_{b}"] # Stability parameter z/L
+#         # result[f"Rif_{b}"] = -
+
+#     heights = [HEIGHTS_DICT[b] for b in booms_available]
+#     speeds = [result[f"ws_{b}_mean"] for b in booms_available]
+#     _, result["alpha"] = stats.power_fit(
+#         heights,
+#         speeds
+#     )
+#     logger.info(f"Computed alpha={result['alpha']} for heights {heights}, speeds {speeds} (u means: {[result[f'u_{b}_mean'] for b in booms_available]})")
+
+#     # TODO: Ri_b, Ri_f, Reynolds stress
+#     # TODO: make sure above computations are ok so far
+
+#     return result
 
 
 def qc_step(df, filepath):

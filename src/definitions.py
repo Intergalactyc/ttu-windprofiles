@@ -91,8 +91,8 @@ HEADER_MAP = {
     "TSN-TRANS" : "u",
     "TSW-TRANS" : "v",
     "TSV-TRANS" : "w",
-    "TS-WS" : "ws",
-    "TS-WD" : "wd"
+    "TS-WS" : None,#"ws",
+    "TS-WD" : None,#"wd"
 }
 
 HEADER_MAP_INV = {v : k for k, v in HEADER_MAP.items()}
